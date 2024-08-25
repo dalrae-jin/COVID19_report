@@ -1,0 +1,419 @@
+---
+title: "COVID_19_Report"
+author: "Dalrae Jin"
+date: "2024-08-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(lubridate)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+### 1. Importing Data - COVID19 dataset from the Johns Hopkins Github site.  
+
+I will start by reading in the data from the four main csv files.
+
+```{r get_jhu_data}
+## Get current Data in the four files
+# they all begin the same way
+url_in <-"https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv",
+                "time_series_covid19_deaths_global.csv",
+                "time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_deaths_US.csv")
+urls <- str_c(url_in, file_names)
+```
+
+Let's read in the data and see what we have.
+```{r import_data, message=FALSE}
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+US_cases <- read_csv(urls[3])
+US_deaths <- read_csv(urls[4])
+```
+
+<br>
+<br>
+
+### 2. Tidying and Transforming Data
+
+After looking at  `global_cases` and `global_deaths`, I would like to tidy those datasets and put each variable(date, cases, deaths) in their own column.
+Also, I don't need Lat and Long for the analysis I am planning, so I will get rid of those and rename Region and State to be more R friendly.
+```{r tidy_global_data}
+global_cases <- global_cases %>% 
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long), 
+               names_to = "date", 
+               values_to = "cases") %>%
+  select(-c(Lat, Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c(`Province/State`, `Country/Region`, Lat, Long), 
+               names_to = "date", 
+               values_to = "deaths") %>%
+  select(-c(Lat, Long))
+
+
+global <- global_cases %>% 
+  full_join(global_deaths) %>% 
+  rename(Country_Region = `Country/Region`,
+         Province_State = `Province/State`) %>%
+  mutate(date = mdy(date))
+  
+# Let's check a summary of the data
+summary(global)
+```
+
+I notice a lot of row that have no cases at all. So, let's filter out and keep only where the cases are positive.
+
+```{r tidy_global_data_2}
+global <- global %>% filter(cases > 0)
+summary(global)
+```
+
+Now, I want to do the same tidy process on US cases.
+```{r tidy_US_data}
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat, Long_))
+
+
+US <- US_cases %>%
+  full_join(US_deaths)
+
+# Let's check a summary of the data
+summary(US)
+```
+
+Notice that we don't have Population data in `global` data. To compare the data later, we are going to need Population data in `global` dataset too.
+Let's add a Population data and a variable called `Combined_Key`(combines Province_State and County_Region).
+```{r combine_data_global}
+global <- global %>%
+  unite("Combined_Key",
+        c(Province_State, Country_Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE)
+
+head(global)
+```
+Now, I need to add Population.
+```{r add_population_to_global}
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(uid_lookup_url) %>%
+  select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+# add Population to global data
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS)) %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+head(global)
+```
+
+<br>
+<br>
+
+### 3. Visualizing Data
+
+We are going to focus on analyzing for the US as a whole for a given state.
+Let's make a new dataset called `US_by_state` using `group_by`.
+
+```{r US_by_state_grouping}
+US_by_state <- US %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarise(cases = sum(cases), deaths = sum(deaths), 
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Province_State, Country_Region, date,
+         cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+head(US_by_state)
+```
+
+Using the same method, we are creating `US_totals`.
+
+```{r US_totals grouping}
+US_totals <- US_by_state %>%
+  group_by(Country_Region, date) %>%
+  summarise(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  select(Country_Region, date,
+         cases, deaths, deaths_per_mill, Population) %>%
+  ungroup()
+
+# Let's see the tail(most recent) of the data 
+tail(US_totals)
+```
+
+Now, let's visualize this data. The graph below is a visualization of the total number of cases and deaths in the United States, from the start of the reporting of the COVID.
+
+```{r US_totals_visualize}
+US_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+
+```
+
+
+Now, let's choose a state (in this case, Texas), and check the the total number of cases and deaths using `ggplot` like above visualization.
+
+```{r US_state_visualize, warning = FALSE}
+state <- "Texas"
+US_by_state %>%
+  filter(Province_State == state) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+
+```
+
+These visualizations lead us to some questions. 
+What is the maximum number of deaths that we've got so far?
+
+```{r max_deaths_sofar}
+print(max(US_totals$date))
+print(max(US_totals$deaths))
+```
+
+This would tell us the maximum number of deaths, but on the graph, it looks like the COVID cases have leveled off. So, is the number of new cases basically flat? In other words, are there no new cases becuase things have leveled off?
+Let's find it out.
+
+<br>
+<br>
+
+### 4. Analyzing Data
+
+In order to analyze the question above, we are going to transform our data again.
+
+```{r transform_data_again}
+US_by_state <- US_by_state %>%
+  mutate(new_cases = cases - lag(cases, default = 0), 
+         new_deaths = deaths - lag(deaths, default = 0))
+
+US_totals <- US_totals %>%
+  mutate(new_cases = cases - lag(cases, default = 0), 
+         new_deaths = deaths - lag(deaths, default = 0))
+
+```
+
+
+We see the new cases, new deaths, and everything else.
+```{r US_totals_tail}
+tail(US_totals %>% select(new_cases, new_deaths, everything()))
+```
+
+Now, let's visualize this new transformed data with new cases and new deaths.
+
+```{r US_totals_new_visualize, warning=FALSE}
+US_totals %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in US", y = NULL)
+
+```
+
+Again, let's check the new cases and new deaths of Texas.
+
+```{r US_state_new_visualize, warning=FALSE}
+state <- "Texas"
+US_by_state %>%
+  filter(Province_State == state) %>%
+  ggplot(aes(x = date, y = new_cases)) +
+  geom_line(aes(color = "new_cases")) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths")) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", state), y = NULL)
+
+```
+
+(some comments and analysis here)
+
+
+Here is another question. 
+What is the worst and best states and how do we measure this? Should we look at the total cases or the death rates per 1000 people?
+
+To answer this question, we need to transform the data once again.
+
+```{r transform_US_states_totals}
+US_state_totals <- US_by_state %>%
+  group_by(Province_State) %>%
+  summarise(deaths = max(deaths), cases = max(cases),
+            population = max(Population),
+            cases_per_thou = 1000 * cases / population,
+            deaths_per_thou = 1000 * deaths / population) %>%
+  filter(cases > 0, population > 0)
+```
+
+We can check the 10 states with the lowest deaths per thousand.
+
+```{r 10_lowest_deaths_per_thou}
+# 10 lowest deaths per thousand
+US_state_totals %>%
+  slice_min(deaths_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+```
+And, 10 states with the highest deaths per thousand.
+
+```{r 10_highest_deaths_per_thou}
+# 10 highest deaths per thousand
+US_state_totals %>%
+  slice_max(deaths_per_thou, n = 10) %>%
+  select(deaths_per_thou, cases_per_thou, everything())
+```
+<br>
+<br>
+
+### 5. Modeling Data
+
+In this part, we are modeling the data to answer more advanced questions.
+Let's start by using a linear model.
+<br>
+
+#### 5-1. Linear model
+
+```{r linear_model_US_state_totals}
+lmod <- lm(deaths_per_thou ~ cases_per_thou, data = US_state_totals)
+
+summary(lmod)
+```
+
+
+Let's make a new dataset where we call it 'US total with prediction'. It's `US_state_totals` with prediction columns using linear model.
+
+```{r US_tot_w_pred}
+US_tot_w_pred <- US_state_totals %>% mutate(pred = predict(lmod))
+head(US_tot_w_pred, 10)
+```
+Now, we plot both actuals and predictions to see how well we are doing against COVID.
+
+```{r plot_actual_pred}
+US_tot_w_pred %>% ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+
+```
+
+From the plot above, we can see that some places have more cases and fewer deaths and other places have fewer cases for the same number of deaths?
+
+This leads us more questions. What is going on with the points with large residuals?
+Is linear model right fit for this dataset? What other variables have I not considered as part of my model that I may want to consider?
+
+<br>
+
+#### 5-2. Linear model with a logarithmic transformation
+
+Let's model this data with a linear model with a logarithmic transformation.
+```{r linear_model_with_log}
+lmod_log <- lm(deaths_per_thou ~ log(cases_per_thou), data = US_state_totals)
+summary(lmod_log)
+```
+
+Let's make a prediction with `lmod_log`.
+```{r US_tot_w_pred_lmod_log}
+US_tot_w_pred_2 <- US_state_totals %>% mutate(pred = predict(lmod_log))
+head(US_tot_w_pred_2)
+```
+
+Let's visualize this prediction.
+
+```{r plot_actual_pred_log}
+US_tot_w_pred_2 %>% ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+
+```
+
+The model `lmod_log` has the adjusted R-squared value of 0.3342 and `lmod` has adjusted R-squared value of 0.2933. Therefore, I would say `lmod_log` would explain the dataset better than `lmod` but not by huge difference.
+
+Let's try one more model.
+
+<br>
+
+#### 5-3. Polynomial Regression
+
+If you expect a more complex, non-linear relationship between the variables, a polynomial regression (e.g., quadratic or cubic) might be appropriate. This can model relationships that change direction as cases per thousand increase.
+
+```{r ploy_US_state_totals}
+poly_mod <- lm(deaths_per_thou ~ poly(cases_per_thou, 2), data = US_state_totals)
+summary(poly_mod)
+```
+Let's make a prediction and visualize it.
+
+```{r US_tot_w_pred_poly_mod}
+US_tot_w_pred_3 <- US_state_totals %>% mutate(pred = predict(poly_mod))
+
+# plot
+US_tot_w_pred_3 %>% ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou), color = "blue") +
+  geom_point(aes(x = cases_per_thou, y = pred), color = "red")
+```
+
+We can see that the model with polynomial regression has higher value of adjusted R-squared (0.3836) than previous models and each polynomial coefficients are statistically significant since each p-value for coefficient are smaller than alpha =  0.05.
+
+It is hard to say that the polynomial regression model is the best fit for the dataset. However, I would say that the polynomial regression model is better fit than linear regression and linear regression with logarithmic transformation.
+
+
+<br>
+<br>
+
+### 6. Conclusion and Sources of Bias
+
+This is the final area of doing data analysis, the area of **bias**.
+In this section, I'd like to include any possible sources of bias.
+
+
+In analyzing the COVID-19 dataset for the United States, I placed particular emphasis on the Texas region. This focus stemmed from my personal connection to Texas, where I reside, and a preconceived notion that the state was struggling significantly with the pandemic. This bias may have influenced my analysis and interpretation of the data, particularly in the visualizations, where I gave more attention to Texas than to other regions.
+
+Additionally, my prediction model was influenced by the belief that the COVID-19 pandemic has largely ended and that widespread vaccination efforts have significantly reduced the severity of outcomes. This led me to favor a linear model with a logarithmic transformation, based on the assumption that the rate of deaths per thousand would level off in relation to the number of cases per thousand. However, this assumption may have introduced bias, as it was grounded in my preconceived notion that the situation had stabilized, which could have affected the objectivity of my analysis.
+
+To mitigate these biases, I ensured that the entire dataset was thoroughly explored, and I compared results across multiple regions to verify that the trends observed in Texas were consistent with those seen elsewhere. Additionally, I tested alternative models and approaches to validate the robustness of my predictions, thereby reducing the impact of my initial assumptions on the final outcomes.
+
+
